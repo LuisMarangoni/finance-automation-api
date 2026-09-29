@@ -1,6 +1,28 @@
-from fastapi import FastAPI, status
+from fastapi import Depends, FastAPI, status
+from sqlalchemy.orm import Session
+from sqlalchemy import select
+from app.database import Base, engine, get_db
+from app.models import TransactionModel
+from typing import Literal
+from fastapi import Query
+from fastapi import Depends, FastAPI, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status
+from sqlalchemy import case, func, select
+from datetime import date
+from decimal import Decimal
+from fastapi import Body
+from pydantic import ValidationError
+from app.csv_import import parse_transactions_csv
 
-from app.schemas import TransactionCreate
+from app.schemas import (
+    TransactionCreate,
+    TransactionReceipt,
+    TransactionResponse,
+    TransactionSummary,
+)
+
+
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title="Finance Automation API",
@@ -16,9 +38,161 @@ def health():
     }
 
 
-@app.post("/transactions", status_code=status.HTTP_201_CREATED)
-def create_transaction(transaction: TransactionCreate):
+@app.post(
+    "/transactions",
+    status_code=status.HTTP_201_CREATED,
+    response_model=TransactionReceipt,
+)
+
+def registrar_transacao(
+        transacao: TransactionCreate,
+        db: Session = Depends(get_db),
+):
+    registro = TransactionModel(**transacao.model_dump())
+
+    db.add(registro)
+    db.commit()
+    db.refresh(registro)
+
+    return TransactionReceipt(
+        status="received",
+        transaction=TransactionResponse.model_validate(registro),
+    )
+
+@app.post(
+    "/transactions/import",
+    status_code=status.HTTP_201_CREATED,
+)
+def importar_transacoes_csv(
+        content: str = Body(..., media_type="text/csv"),
+        db: Session = Depends(get_db),
+):
+    try:
+        transacoes = parse_transactions_csv(content)
+    except (ValueError, ValidationError) as erro:
+        raise HTTPException(
+            status_code=422,
+            detail=str(erro),
+        ) from erro
+
+    registros = [
+        TransactionModel(**transacao.model_dump())
+        for transacao in transacoes
+    ]
+
+    try:
+        db.add_all(registros)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
     return {
-        "status": "received",
-        "transaction": transaction,
+        "status": "imported",
+        "imported_count": len(registros),
     }
+
+@app.get(
+    "/transactions",
+    response_model=list[TransactionResponse],
+)
+
+def listar_transacoes(
+        transaction_type: Literal["RECEITA", "DESPESA"] | None = None,
+        category: str | None = Query(default=None, min_length=1, max_length=100),
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        db: Session = Depends(get_db),
+):
+    consulta = select(TransactionModel)
+
+    if transaction_type is not None:
+        consulta = consulta.where(
+            TransactionModel.transaction_type == transaction_type
+        )
+
+    if category is not None:
+        consulta = consulta.where(
+            TransactionModel.category == category
+        )
+
+    consulta = (
+        consulta
+        .order_by(
+            TransactionModel.occurred_on.desc(),
+            TransactionModel.id.desc(),
+        )
+        .offset(offset)
+        .limit(limit)
+    )
+
+    registros = db.scalars(consulta).all()
+
+    return [
+        TransactionResponse.model_validate(registro)
+        for registro in registros
+    ]
+
+@app.get(
+    "/transactions/summary",
+    response_model=TransactionSummary,
+)
+
+def resumir_transacoes(
+        start_date: date,
+        end_date: date,
+        db: Session = Depends(get_db),
+):
+    if start_date > end_date:
+        raise HTTPException(
+            status_code=422,
+            detail="start_date must be on or before end_date",
+        )
+
+    receita = func.coalesce(
+        func.sum(
+            case(
+                (
+                    TransactionModel.transaction_type == "RECEITA",
+                    TransactionModel.amount,
+                ),
+                else_=0,
+            )
+        ),
+        0,
+    ).label("total_income")
+
+    despesa = func.coalesce(
+        func.sum(
+            case(
+                (
+                    TransactionModel.transaction_type == "DESPESA",
+                    TransactionModel.amount,
+                ),
+                else_=0,
+            )
+        ),
+        0,
+    ).label("total_expenses")
+
+    consulta = (
+        select(receita, despesa)
+        .where(TransactionModel.occurred_on >= start_date)
+        .where(TransactionModel.occurred_on <= end_date)
+    )
+
+    resultado = db.execute(consulta).one()
+    total_receitas = Decimal(str(resultado.total_income)).quantize(
+        Decimal("0.01")
+    )
+    total_despesas = Decimal(str(resultado.total_expenses)).quantize(
+        Decimal("0.01")
+    )
+
+    return TransactionSummary(
+        start_date=start_date,
+        end_date=end_date,
+        total_income=total_receitas,
+        total_expenses=total_despesas,
+        balance=total_receitas - total_despesas,
+    )
