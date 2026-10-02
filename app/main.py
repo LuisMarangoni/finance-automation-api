@@ -13,12 +13,16 @@ from fastapi import Body
 from pydantic import ValidationError
 from app.csv_import import parse_transactions_csv
 from app.models import PayrollPeriodModel, TransactionModel
+from datetime import datetime, timezone
 
 from app.payroll_schemas import (
     PayrollItemCreate,
     PayrollItemResponse,
     PayrollPeriodCreate,
     PayrollPeriodResponse,
+    PayrollItemReviewRequest,
+    PayrollItemReviewStatus,
+    PayrollPeriodSummaryResponse,
 )
 
 from app.models import (
@@ -262,6 +266,12 @@ def criar_item_folha(
             detail="Payroll period not found",
         )
 
+    if periodo.status != "OPEN":
+        raise HTTPException(
+             status_code=409,
+            detail="Payroll period is not open for changes",
+        )
+
     registro = PayrollItemModel(
         period_id=period_id,
         employee_id=item.employee_id,
@@ -270,7 +280,7 @@ def criar_item_folha(
         amount=item.amount,
         item_type=item.item_type.value,
         source=item.source,
-        review_status=item.review_status.value,
+        review_status="PENDING",
     )
 
     db.add(registro)
@@ -278,3 +288,236 @@ def criar_item_folha(
     db.refresh(registro)
 
     return PayrollItemResponse.model_validate(registro)
+
+@app.patch(
+    "/payroll/items/{item_id}/review",
+    response_model=PayrollItemResponse,
+)
+def revisar_item_folha(
+        item_id: int,
+        revisao: PayrollItemReviewRequest,
+        db: Session = Depends(get_db),
+):
+    item = db.get(PayrollItemModel, item_id)
+
+    if item is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Payroll item not found",
+        )
+
+    periodo = db.get(PayrollPeriodModel, item.period_id)
+
+    if periodo.status != "OPEN":
+        raise HTTPException(
+            status_code=409,
+            detail="Payroll period is not open for review",
+        )
+
+    if item.review_status != "PENDING":
+        raise HTTPException(
+            status_code=409,
+            detail="Payroll item has already been reviewed",
+        )
+
+    item.review_status = revisao.status
+    item.review_note = revisao.note
+    item.reviewed_at = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(item)
+
+    return PayrollItemResponse.model_validate(item)
+
+@app.get(
+    "/payroll/periods/{period_id}/items",
+    response_model=list[PayrollItemResponse],
+)
+def listar_itens_folha(
+        period_id: int,
+        review_status: PayrollItemReviewStatus | None = None,
+        db: Session = Depends(get_db),
+):
+    periodo = db.get(PayrollPeriodModel, period_id)
+
+    if periodo is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Payroll period not found",
+        )
+
+    consulta = select(PayrollItemModel).where(
+        PayrollItemModel.period_id == period_id
+    )
+
+    if review_status is not None:
+        consulta = consulta.where(
+            PayrollItemModel.review_status == review_status.value
+        )
+
+    itens = db.scalars(
+        consulta.order_by(PayrollItemModel.id)
+    ).all()
+
+    return [
+        PayrollItemResponse.model_validate(item)
+        for item in itens
+    ]
+
+@app.get(
+    "/payroll/periods/{period_id}/summary",
+    response_model=PayrollPeriodSummaryResponse,
+)
+def resumir_competencia_folha(
+        period_id: int,
+        db: Session = Depends(get_db),
+):
+    periodo = db.get(PayrollPeriodModel, period_id)
+
+    if periodo is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Payroll period not found",
+        )
+
+    itens = db.scalars(
+        select(PayrollItemModel).where(
+            PayrollItemModel.period_id == period_id
+        )
+    ).all()
+
+    aprovados = [
+        item for item in itens
+        if item.review_status == "APPROVED"
+    ]
+
+    total_ganhos = sum(
+        (
+            item.amount for item in aprovados
+            if item.item_type == "EARNING"
+        ),
+        Decimal("0.00"),
+    )
+
+    total_descontos = sum(
+        (
+            item.amount for item in aprovados
+            if item.item_type == "DEDUCTION"
+        ),
+        Decimal("0.00"),
+    )
+
+    return PayrollPeriodSummaryResponse(
+        period_id=periodo.id,
+        year=periodo.year,
+        month=periodo.month,
+        total_approved_earnings=total_ganhos,
+        total_approved_deductions=total_descontos,
+        approved_balance=total_ganhos - total_descontos,
+        approved_items_count=len(aprovados),
+        pending_items_count=sum(
+            item.review_status == "PENDING" for item in itens
+        ),
+        rejected_items_count=sum(
+            item.review_status == "REJECTED" for item in itens
+        ),
+    )
+
+@app.post(
+    "/payroll/periods/{period_id}/submit",
+    response_model=PayrollPeriodResponse,
+)
+def enviar_competencia_para_aprovacao(
+        period_id: int,
+        db: Session = Depends(get_db),
+):
+    periodo = db.get(PayrollPeriodModel, period_id)
+
+    if periodo is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Payroll period not found",
+        )
+
+    if periodo.status != "OPEN":
+        raise HTTPException(
+            status_code=409,
+            detail="Payroll period is not open",
+        )
+
+    pendentes = db.scalar(
+        select(func.count(PayrollItemModel.id)).where(
+            PayrollItemModel.period_id == period_id,
+            PayrollItemModel.review_status == "PENDING",
+            )
+    )
+
+    if pendentes:
+        raise HTTPException(
+            status_code=409,
+            detail="Payroll period has pending items",
+        )
+
+    periodo.status = "PENDING_APPROVAL"
+
+    db.commit()
+    db.refresh(periodo)
+
+    return PayrollPeriodResponse.model_validate(periodo)
+
+@app.post(
+    "/payroll/periods/{period_id}/approve",
+    response_model=PayrollPeriodResponse,
+)
+def aprovar_competencia_folha(
+        period_id: int,
+        db: Session = Depends(get_db),
+):
+    periodo = db.get(PayrollPeriodModel, period_id)
+
+    if periodo is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Payroll period not found",
+        )
+
+    if periodo.status != "PENDING_APPROVAL":
+        raise HTTPException(
+            status_code=409,
+            detail="Payroll period is not awaiting approval",
+        )
+
+    periodo.status = "APPROVED"
+    db.commit()
+    db.refresh(periodo)
+
+    return PayrollPeriodResponse.model_validate(periodo)
+
+
+@app.post(
+    "/payroll/periods/{period_id}/close",
+    response_model=PayrollPeriodResponse,
+)
+def encerrar_competencia_folha(
+        period_id: int,
+        db: Session = Depends(get_db),
+):
+    periodo = db.get(PayrollPeriodModel, period_id)
+
+    if periodo is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Payroll period not found",
+        )
+
+    if periodo.status != "APPROVED":
+        raise HTTPException(
+            status_code=409,
+            detail="Payroll period must be approved before closing",
+        )
+
+    periodo.status = "CLOSED"
+    db.commit()
+    db.refresh(periodo)
+
+    return PayrollPeriodResponse.model_validate(periodo)

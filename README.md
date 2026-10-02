@@ -10,6 +10,11 @@ API REST para automação financeira e processamento inicial de folha de pagamen
 - Importação de transações via CSV
 - Criação de competências de folha de pagamento
 - Criação de itens de folha pendentes de aprovação
+- Revisão individual de itens com aprovação ou rejeição justificada
+- Listagem de itens com filtro por estado de revisão
+- Resumo da competência considerando somente itens aprovados
+- Fluxo de competência: aberta, enviada para aprovação, aprovada e encerrada
+- Bloqueio de inclusão de itens após o encerramento da competência
 - Validação de dados com Pydantic
 - Persistência com SQLAlchemy
 - Execução com PostgreSQL via Docker
