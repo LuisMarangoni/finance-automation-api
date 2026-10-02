@@ -55,6 +55,10 @@ python -m pytest -q
 
 Os testes utilizam automaticamente o banco separado `finance_test.db`, recriado a cada execução por `tests/conftest.py`.
 
+## Integração contínua
+
+O GitHub Actions executa a suíte de testes em cada push para `master` e em pull requests direcionados a `master`. As dependências usadas pelo ambiente de CI estão declaradas em `requirements.txt`.
+
 ## Banco de dados
 
 O banco de desenvolvimento local utiliza `finance.db`. Para executar com PostgreSQL, configure a variável `DATABASE_URL` conforme o ambiente e inicie o Docker Compose:
