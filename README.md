@@ -1,0 +1,66 @@
+# Finance Automation API
+
+API REST para automação financeira e processamento inicial de folha de pagamento.
+
+## Funcionalidades
+
+- Cadastro de receitas e despesas
+- Listagem e filtragem de transações
+- Resumo financeiro por período
+- Importação de transações via CSV
+- Criação de competências de folha de pagamento
+- Criação de itens de folha pendentes de aprovação
+- Validação de dados com Pydantic
+- Persistência com SQLAlchemy
+- Execução com PostgreSQL via Docker
+- Testes automatizados com Pytest
+
+## Tecnologias
+
+- Python 3.13+
+- FastAPI
+- Pydantic
+- SQLAlchemy
+- PostgreSQL
+- Docker Compose
+- Pytest
+
+## Execução local
+
+Ative o ambiente virtual:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+Inicie a API:
+
+```powershell
+uvicorn app.main:app --reload
+```
+
+Documentação interativa:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+## Testes
+
+Execute todos os testes com:
+
+```powershell
+python -m pytest -q
+```
+
+Os testes utilizam automaticamente o banco separado `finance_test.db`, recriado a cada execução por `tests/conftest.py`.
+
+## Banco de dados
+
+O banco de desenvolvimento local utiliza `finance.db`. Para executar com PostgreSQL, configure a variável `DATABASE_URL` conforme o ambiente e inicie o Docker Compose:
+
+```powershell
+docker compose up -d database
+```
+
+Arquivos locais de banco, ambientes virtuais e configurações da IDE não são versionados.

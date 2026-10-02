@@ -2,7 +2,6 @@ from fastapi import Depends, FastAPI, status
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from app.database import Base, engine, get_db
-from app.models import TransactionModel
 from typing import Literal
 from fastapi import Query
 from fastapi import Depends, FastAPI, Query, status
@@ -13,6 +12,20 @@ from decimal import Decimal
 from fastapi import Body
 from pydantic import ValidationError
 from app.csv_import import parse_transactions_csv
+from app.models import PayrollPeriodModel, TransactionModel
+
+from app.payroll_schemas import (
+    PayrollItemCreate,
+    PayrollItemResponse,
+    PayrollPeriodCreate,
+    PayrollPeriodResponse,
+)
+
+from app.models import (
+    PayrollItemModel,
+    PayrollPeriodModel,
+    TransactionModel,
+)
 
 from app.schemas import (
     TransactionCreate,
@@ -196,3 +209,72 @@ def resumir_transacoes(
         total_expenses=total_despesas,
         balance=total_receitas - total_despesas,
     )
+
+@app.post(
+    "/payroll/periods",
+    status_code=status.HTTP_201_CREATED,
+    response_model=PayrollPeriodResponse,
+)
+def criar_competencia_folha(
+        competencia: PayrollPeriodCreate,
+        db: Session = Depends(get_db),
+):
+    existente = db.scalar(
+        select(PayrollPeriodModel).where(
+            PayrollPeriodModel.year == competencia.year,
+            PayrollPeriodModel.month == competencia.month,
+            )
+    )
+
+    if existente is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Payroll period already exists",
+        )
+
+    periodo = PayrollPeriodModel(
+        year=competencia.year,
+        month=competencia.month,
+        status="OPEN",
+    )
+
+    db.add(periodo)
+    db.commit()
+    db.refresh(periodo)
+
+    return PayrollPeriodResponse.model_validate(periodo)
+
+@app.post(
+    "/payroll/periods/{period_id}/items",
+    status_code=status.HTTP_201_CREATED,
+    response_model=PayrollItemResponse,
+)
+def criar_item_folha(
+        period_id: int,
+        item: PayrollItemCreate,
+        db: Session = Depends(get_db),
+):
+    periodo = db.get(PayrollPeriodModel, period_id)
+
+    if periodo is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Payroll period not found",
+        )
+
+    registro = PayrollItemModel(
+        period_id=period_id,
+        employee_id=item.employee_id,
+        code=item.code,
+        description=item.description,
+        amount=item.amount,
+        item_type=item.item_type.value,
+        source=item.source,
+        review_status=item.review_status.value,
+    )
+
+    db.add(registro)
+    db.commit()
+    db.refresh(registro)
+
+    return PayrollItemResponse.model_validate(registro)
